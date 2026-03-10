@@ -21,15 +21,8 @@ st.set_page_config(page_title="RAG Study Assistant", page_icon="📚", layout="w
 st.title("📚 RAG Study Assistant")
 st.caption("Upload a document and ask questions — answers come only from your document.")
 
-# ── Sidebar: API key + file upload ──────────────────────────────────
+# ── Sidebar: file upload ────────────────────────────────────────────
 with st.sidebar:
-    st.header("Settings")
-    groq_key = st.text_input("Groq API Key", type="password", help="Required to query the LLM.")
-    if groq_key:
-        import os
-        os.environ["GROQ_API_KEY"] = groq_key
-
-    st.divider()
     st.header("Upload Document")
     uploaded_file = st.file_uploader(
         "Choose a PDF or TXT file",
@@ -87,10 +80,6 @@ if question:
     # Guard: need a document loaded
     if "index" not in st.session_state:
         st.warning("Please upload a document first.")
-        st.stop()
-
-    if not groq_key:
-        st.warning("Please enter your Groq API key in the sidebar.")
         st.stop()
 
     # Show user message

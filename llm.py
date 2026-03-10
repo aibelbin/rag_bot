@@ -6,7 +6,11 @@ with a system prompt that forbids hallucination.
 """
 
 import os
+
+from dotenv import load_dotenv
 from groq import Groq
+
+load_dotenv()
 
 # Strict anti-hallucination prompt template
 SYSTEM_PROMPT = (
@@ -24,7 +28,7 @@ USER_TEMPLATE = (
 )
 
 # Default model — fast and capable on Groq
-DEFAULT_MODEL = "llama3-70b-8192"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 
 def ask_llm(
