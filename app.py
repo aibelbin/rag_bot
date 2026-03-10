@@ -1,9 +1,9 @@
 """
 app.py — Streamlit RAG Study Assistant
 
-Upload a PDF or TXT, ask questions, and get answers strictly
-grounded in the document content.  Uses local embeddings (sentence-
-transformers), a local FAISS vector store, and Groq for the LLM.
+Upload notes (PDF/TXT) and an optional syllabus. Ask questions and
+get answers strictly grounded in the notes, filtered to only cover
+topics within the syllabus.
 
 Run with:
     streamlit run app.py
@@ -19,44 +19,83 @@ from llm import ask_llm
 # ── Page configuration ──────────────────────────────────────────────
 st.set_page_config(page_title="RAG Study Assistant", page_icon="📚", layout="wide")
 st.title("📚 RAG Study Assistant")
-st.caption("Upload a document and ask questions — answers come only from your document.")
+st.caption("Upload your notes and syllabus — answers come only from your notes, scoped to your syllabus.")
 
-# ── Sidebar: file upload ────────────────────────────────────────────
+# ── Sidebar: upload Notes + Syllabus ────────────────────────────────
 with st.sidebar:
-    st.header("Upload Document")
-    uploaded_file = st.file_uploader(
-        "Choose a PDF or TXT file",
+    st.header("📝 Notes")
+    uploaded_notes = st.file_uploader(
+        "Upload study notes",
         type=["pdf", "txt"],
-        help="Max ~200 pages recommended.",
+        key="notes_uploader",
+        help="Your study material (PDF or TXT).",
     )
 
-# ── Process uploaded file ───────────────────────────────────────────
-if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
-    doc_hash = file_hash(file_bytes)
+    st.divider()
 
-    # Store the current document hash in session state
-    if "doc_hash" not in st.session_state or st.session_state.doc_hash != doc_hash:
-        st.session_state.doc_hash = doc_hash
-        st.session_state.messages = []  # reset chat on new document
+    st.header("📋 Syllabus")
+    uploaded_syllabus = st.file_uploader(
+        "Upload syllabus",
+        type=["pdf", "txt"],
+        key="syllabus_uploader",
+        help="Optional — limits answers to syllabus topics only.",
+    )
 
-    # Build or load the FAISS index
-    if index_exists(doc_hash):
+# ── Process notes ───────────────────────────────────────────────────
+if uploaded_notes is not None:
+    notes_bytes = uploaded_notes.read()
+    notes_hash = file_hash(notes_bytes)
+
+    if "notes_hash" not in st.session_state or st.session_state.notes_hash != notes_hash:
+        st.session_state.notes_hash = notes_hash
+        st.session_state.messages = []
+
+    if index_exists(notes_hash):
         with st.sidebar:
-            st.success("✅ Index loaded from cache.")
-        index, chunks = load_index(doc_hash)
+            st.success("✅ Notes index loaded from cache.")
+        notes_index, notes_chunks = load_index(notes_hash)
     else:
-        with st.sidebar, st.spinner("Processing document — extracting, chunking, embedding…"):
-            text = extract_text(uploaded_file.name, file_bytes)
+        with st.sidebar, st.spinner("Processing notes — extracting, chunking, embedding…"):
+            text = extract_text(uploaded_notes.name, notes_bytes)
             if not text.strip():
-                st.error("Could not extract any text from this file.")
+                st.error("Could not extract any text from the notes file.")
                 st.stop()
-            index, chunks = build_and_save_index(text, doc_hash)
-            st.success(f"✅ Indexed {len(chunks)} chunks.")
+            notes_index, notes_chunks = build_and_save_index(text, notes_hash)
+            st.success(f"✅ Notes indexed ({len(notes_chunks)} chunks).")
 
-    # Store index & chunks in session state for the chat loop
-    st.session_state.index = index
-    st.session_state.chunks = chunks
+    st.session_state.notes_index = notes_index
+    st.session_state.notes_chunks = notes_chunks
+
+# ── Process syllabus ────────────────────────────────────────────────
+if uploaded_syllabus is not None:
+    syl_bytes = uploaded_syllabus.read()
+    syl_hash = file_hash(syl_bytes)
+
+    if "syl_hash" not in st.session_state or st.session_state.syl_hash != syl_hash:
+        st.session_state.syl_hash = syl_hash
+
+    if index_exists(syl_hash):
+        with st.sidebar:
+            st.success("✅ Syllabus index loaded from cache.")
+        syl_index, syl_chunks = load_index(syl_hash)
+    else:
+        with st.sidebar, st.spinner("Processing syllabus…"):
+            syl_text = extract_text(uploaded_syllabus.name, syl_bytes)
+            if not syl_text.strip():
+                st.error("Could not extract any text from the syllabus file.")
+                st.stop()
+            # Smaller chunks for syllabus — topics are usually short
+            syl_index, syl_chunks = build_and_save_index(
+                syl_text, syl_hash, chunk_size=200, overlap=40
+            )
+            st.success(f"✅ Syllabus indexed ({len(syl_chunks)} chunks).")
+
+    st.session_state.syl_index = syl_index
+    st.session_state.syl_chunks = syl_chunks
+else:
+    # Clear syllabus from session if removed
+    st.session_state.pop("syl_index", None)
+    st.session_state.pop("syl_chunks", None)
 
 # ── Chat interface ──────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -69,7 +108,10 @@ for msg in st.session_state.messages:
         if "chunks_used" in msg:
             with st.expander("📄 Retrieved chunks"):
                 for i, c in enumerate(msg["chunks_used"], 1):
-                    st.markdown(f"**Chunk {c['chunk_index']}** (score: {c['score']:.3f})")
+                    label = f"**Chunk {c['chunk_index']}** (score: {c['score']:.3f})"
+                    if "syllabus_topic" in c:
+                        label += f"  ·  📋 _{c['syllabus_topic']}…_"
+                    st.markdown(label)
                     st.text(c["text"][:500] + ("…" if len(c["text"]) > 500 else ""))
                     st.divider()
 
@@ -77,22 +119,26 @@ for msg in st.session_state.messages:
 question = st.chat_input("Ask a question about your document…")
 
 if question:
-    # Guard: need a document loaded
-    if "index" not in st.session_state:
-        st.warning("Please upload a document first.")
+    if "notes_index" not in st.session_state:
+        st.warning("Please upload your study notes first.")
         st.stop()
 
-    # Show user message
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
-    # Retrieve relevant chunks
+    # Determine if syllabus filtering is active
+    syl_index = st.session_state.get("syl_index")
+    syl_chunks = st.session_state.get("syl_chunks")
+
+    # Retrieve relevant chunks (with optional syllabus filtering)
     results = retrieve(
         query=question,
-        index=st.session_state.index,
-        chunks=st.session_state.chunks,
+        index=st.session_state.notes_index,
+        chunks=st.session_state.notes_chunks,
         top_k=5,
+        syllabus_index=syl_index,
+        syllabus_chunks=syl_chunks,
     )
 
     # Build context string from retrieved chunks
@@ -100,20 +146,33 @@ if question:
         f"[Chunk {r['chunk_index']}]: {r['text']}" for r in results
     )
 
+    # Build syllabus topics string for the LLM prompt
+    syllabus_topics = ""
+    if syl_chunks:
+        syllabus_topics = "\n".join(
+            f"- {c['text'][:200]}" for c in syl_chunks
+        )
+
     # Query LLM
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
-            answer = ask_llm(context=context, question=question)
+            answer = ask_llm(
+                context=context,
+                question=question,
+                syllabus_topics=syllabus_topics,
+            )
         st.markdown(answer)
 
         # Show retrieved chunks for transparency
         with st.expander("📄 Retrieved chunks"):
             for i, c in enumerate(results, 1):
-                st.markdown(f"**Chunk {c['chunk_index']}** (score: {c['score']:.3f})")
+                label = f"**Chunk {c['chunk_index']}** (score: {c['score']:.3f})"
+                if "syllabus_topic" in c:
+                    label += f"  ·  📋 _{c['syllabus_topic']}…_"
+                st.markdown(label)
                 st.text(c["text"][:500] + ("…" if len(c["text"]) > 500 else ""))
                 st.divider()
 
-    # Save assistant response to history
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
