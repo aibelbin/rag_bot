@@ -1,91 +1,84 @@
-"""
-llm.py — Strict document-QA via Groq API.
-
-Sends the retrieved context + user question to a Groq-hosted LLM
-with a system prompt that forbids hallucination.
-"""
+"""llm.py - Lightweight Groq chat wrapper for the Streamlit chatbot."""
 
 import os
+import json
 
 from dotenv import load_dotenv
 from groq import Groq
 
 load_dotenv()
 
-# Strict anti-hallucination prompt template
 SYSTEM_PROMPT = (
-    "You are a document question answering system.\n\n"
-    "Only answer using the provided context.\n"
-    "If the answer is not explicitly present in the context, "
-    'reply exactly:\n"The answer is not present in the uploaded document."\n\n'
-    "Do not infer, guess, or add outside knowledge."
-)
-
-SYSTEM_PROMPT_WITH_SYLLABUS = (
-    "You are a document question answering system that is also constrained "
-    "by a syllabus.\n\n"
-    "Rules:\n"
-    "1. Only answer using the provided context from the study notes.\n"
-    "2. Only include information that falls within the syllabus topics listed below.\n"
-    "3. If the answer is not explicitly present in the context, "
-    'reply exactly:\n"The answer is not present in the uploaded document."\n'
-    "4. If the answer is in the notes but NOT covered by the syllabus, "
-    'reply exactly:\n"This topic is outside the scope of your syllabus."\n\n'
-    "Do not infer, guess, or add outside knowledge."
-)
-
-USER_TEMPLATE = (
-    "Context:\n{context}\n\n"
-    "Question:\n{question}\n\n"
-    "Answer strictly using the context."
-)
-
-USER_TEMPLATE_WITH_SYLLABUS = (
-    "Syllabus Topics:\n{syllabus}\n\n"
-    "Context from Notes:\n{context}\n\n"
-    "Question:\n{question}\n\n"
-    "Answer strictly using the context, only if the topic is within the syllabus."
+    "You are a helpful AI assistant in a web chat app. "
+    "Give clear and concise answers."
 )
 
 # Default model — fast and capable on Groq
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 
-def ask_llm(
-    context: str,
-    question: str,
-    syllabus_topics: str = "",
-    model: str = DEFAULT_MODEL,
-) -> str:
-    """
-    Send the context + question to Groq and return the model's answer.
+SPI_SYSTEM_PROMPT = (
+    "You are an educational performance analyst. "
+    "Given structured student profile data, provide practical, supportive, and specific guidance. "
+    "Do not diagnose medical conditions. Avoid judgmental language."
+)
 
-    If syllabus_topics is provided, the prompt constrains answers
-    to only topics covered by the syllabus.
-    """
+
+def chat_with_llm(messages: list[dict], model: str = DEFAULT_MODEL) -> str:
+    """Send chat history to Groq and return a single assistant response."""
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         return "Error: GROQ_API_KEY environment variable is not set."
 
     client = Groq(api_key=api_key)
 
-    if syllabus_topics:
-        system = SYSTEM_PROMPT_WITH_SYLLABUS
-        user_message = USER_TEMPLATE_WITH_SYLLABUS.format(
-            syllabus=syllabus_topics, context=context, question=question
-        )
-    else:
-        system = SYSTEM_PROMPT
-        user_message = USER_TEMPLATE.format(context=context, question=question)
+    payload = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role in {"user", "assistant"} and isinstance(content, str):
+            payload.append({"role": role, "content": content})
+
+    chat_completion = client.chat.completions.create(
+        model=model,
+        messages=payload,
+        temperature=0.7,
+        max_tokens=1024,
+    )
+
+    return chat_completion.choices[0].message.content or "I couldn't generate a response."
+
+
+def generate_spi_recommendation(student_profile: dict, model: str = DEFAULT_MODEL) -> str:
+    """Generate a structured SPI recommendation from profile and quiz inputs."""
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return "Error: GROQ_API_KEY environment variable is not set."
+
+    client = Groq(api_key=api_key)
+
+    user_prompt = (
+        "Analyze the following student profile and provide a concise report in markdown with these headings:\n"
+        "1) Overall Performance Category (Excellent/Good/Average/Needs Improvement)\n"
+        "2) Risk Level (Low/Medium/High)\n"
+        "3) Key Strengths (3 bullets)\n"
+        "4) Key Concerns (3 bullets)\n"
+        "5) 4-Week Improvement Plan (weekly actions)\n"
+        "6) Daily Study Routine (time-block style)\n"
+        "7) Teacher/Mentor Interventions (3 bullets)\n"
+        "8) Motivation Note (2-3 lines)\n\n"
+        "Student Profile JSON:\n"
+        f"{json.dumps(student_profile, indent=2)}"
+    )
 
     chat_completion = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_message},
+            {"role": "system", "content": SPI_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
         ],
-        temperature=0,       # deterministic — minimises hallucination
-        max_tokens=1024,
+        temperature=0.4,
+        max_tokens=1200,
     )
 
-    return chat_completion.choices[0].message.content
+    return chat_completion.choices[0].message.content or "I couldn't generate a recommendation."
